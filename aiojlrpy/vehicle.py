@@ -109,7 +109,7 @@ class Vehicle:
 
     async def get_service_status(self, service_id) -> dict | None:
         """Get status of called vehicle service"""
-        headers = {"Accept": HttpAccepts.SERVICE_STATUS}
+        headers = {"Accept": HttpAccepts.SERVICE_STATUS_V4}
         return await self._get(f"services/{service_id}", headers)
 
     async def get_services(self) -> dict | None:
@@ -242,7 +242,7 @@ class Vehicle:
     async def request_vehicle_health_status_update(self) -> dict | None:
         """Get vehicle health status from vehicle"""
         headers = {
-            "Accept": HttpAccepts.SERVICE_STATUS,
+            "Accept": HttpAccepts.SERVICE_STATUS_V4,
             "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
         }
         vhs_data = await self._authenticate_service("", JLRServices.VEHICLE_HEALTH)
@@ -347,7 +347,7 @@ class Vehicle:
     async def honk_blink(self):
         """Sound the horn and blink lights"""
         headers = {
-            "Accept": HttpAccepts.SERVICE_STATUS,
+            "Accept": HttpAccepts.SERVICE_STATUS_V4,
             "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
         }
         # Authenticates using last 4 digits of vin as pin
@@ -391,7 +391,7 @@ class Vehicle:
         """Reset vehicle alarm"""
         headers = {
             "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
-            "Accept": HttpAccepts.SERVICE_STATUS,
+            "Accept": HttpAccepts.SERVICE_STATUS_V4,
         }
         aloff_data = await self._authenticate_service(pin, JLRServices.ALARM_OFF)
         return await self._post("unlock", headers, aloff_data)
@@ -409,7 +409,7 @@ class Vehicle:
     ):
         """Charging profile API"""
         headers = {
-            "Accept": HttpAccepts.SERVICE_STATUS,
+            "Accept": HttpAccepts.SERVICE_STATUS_V5,
             "Content-Type": HTTPContentType.PHEV_SERVICE,
         }
         # Authenticates using last 4 digits of vin as pin
@@ -432,7 +432,7 @@ class Vehicle:
     async def _preconditioning_control_command(self, service_parameters: list):
         """Control the climate preconditioning"""
         headers = {
-            "Accept": HttpAccepts.SERVICE_STATUS,
+            "Accept": HttpAccepts.SERVICE_STATUS_V5,
             "Content-Type": HTTPContentType.PHEV_SERVICE,
         }
         # Authenticates using last 4 digits of vin as pin
@@ -452,7 +452,7 @@ class Vehicle:
     async def _wakeup_timer_command(self, swu_data: dict):
         """Set the wakeup time for the specified time (epoch milliseconds)"""
         headers = {
-            "Accept": HttpAccepts.SERVICE_STATUS,
+            "Accept": HttpAccepts.SERVICE_STATUS_V4,
             "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
         }
         return await self._post("swu", headers, swu_data)
