@@ -33,8 +33,8 @@ class Connection:
 
     def __init__(
         self,
-        email: str = "",
-        password: str = "",
+        email: str,
+        password: str,
         device_id: str = "",
         refresh_token: str = "",
         use_china_servers: bool = False,
@@ -77,37 +77,37 @@ class Connection:
                 "password": password,
             }
 
-    def validate_token(self):
+    async def validate_token(self):
         """Is token still valid"""
         now = calendar.timegm(datetime.now().timetuple())
         if now > self.expiration:
             # Auth expired, reconnect
-            self.connect()
+            await self.connect()
 
     async def get(self, command: str, url: str, headers: dict) -> str | dict:
         """GET data from API"""
-        self.validate_token()
+        await self.validate_token()
         return await self._request(f"{url}/{command}", headers=headers, method="GET")
 
     async def post(self, command: str, url: str, headers: dict, data: dict = None) -> str | dict:
         """POST data to API"""
-        self.validate_token()
+        await self.validate_token()
         return await self._request(f"{url}/{command}", headers=headers, data=data, method="POST")
 
     async def delete(self, command: str, url: str, headers: dict) -> str | dict:
         """DELETE data from api"""
-        self.validate_token()
+        await self.validate_token()
         if headers and headers["Accept"]:
             del headers["Accept"]
         return await self._request(url=f"{url}/{command}", headers=headers, method="DELETE")
 
     async def connect(self):
         """Connect to JLR API"""
-        logger.info("Connecting...")
+        logger.debug("Connecting...")
         auth = await self._authenticate(data=self.oauth)
         self._register_auth(auth)
         self._set_header(auth["access_token"])
-        logger.info("[+] authenticated")
+        logger.debug("[+] authenticated")
         await self._register_device_and_log_in()
 
         try:
@@ -117,13 +117,11 @@ class Connection:
         except TypeError as ex:
             logger.error("No vehicles associated with this account - %s", ex)
 
-        if self.vehicles:
+        if self.vehicles and self.ws_message_callabck:
             for vehicle in self.vehicles:
                 await vehicle.set_notification_target(
                     await vehicle.get_notification_available_services_list()
                 )
-
-            if self.ws_message_callabck:
                 await self.ws_connect()
 
     async def ws_connect(self):
@@ -156,9 +154,9 @@ class Connection:
 
     async def _register_device_and_log_in(self):
         await self._register_device()
-        logger.info("1/2 device id registered")
+        logger.debug("1/2 device id registered")
         await self._login_user()
-        logger.info("2/2 user logged in, user id retrieved")
+        logger.debug("2/2 user logged in, user id retrieved")
 
     async def _request(
         self, url: str, headers: dict = None, data: dict = None, method: str = "GET"
@@ -169,7 +167,6 @@ class Connection:
 
         if data is not None:
             kwargs["json"] = data
-
         async with aiohttp.ClientSession() as session:
             async with getattr(session, method.lower())(url, **kwargs) as response:
                 if response.ok:
@@ -182,7 +179,11 @@ class Connection:
                             return response
                     else:
                         return {}
-            return None
+                else:
+                    logger.warning(
+                        "URL: %s, HEADERS: %s, DATA: %s, METHOD: %s", url, headers, data, method
+                    )
+                    raise JLRException(response)
 
     def _register_auth(self, auth: dict):
         self.access_token = auth["access_token"]
@@ -201,7 +202,6 @@ class Connection:
     def _set_header(self, access_token: str):
         """Set HTTP header fields"""
         self.head = {
-            "Accept": HttpAccepts.JSON,
             "Authorization": f"Bearer {access_token}",
             "X-Device-Id": self.device_id,
             "x-telematicsprogramtype": "jlrpy",
