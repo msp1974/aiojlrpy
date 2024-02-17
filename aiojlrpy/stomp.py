@@ -170,7 +170,7 @@ class JLRStompClient:
 
     async def _on_disconnect(self):
         """Callback for disconnection"""
-        logger.info("DISCONNECTED")
+        logger.debug("Websocket has disconnected")
         self._subscriptions = {}
         self.connected = False
 
