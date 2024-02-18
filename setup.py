@@ -23,7 +23,7 @@ def get_version(rel_path):
 
 
 setuptools.setup(
-    name="aiojlypy",
+    name="aiojlrpy",
     version=get_version("aiojlrpy/__init__.py"),
     author="msp1974",
     author_email="msparker@sky.com",
