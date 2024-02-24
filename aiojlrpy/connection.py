@@ -47,14 +47,17 @@ class Connection:
         A refresh token can be supplied for authentication instead of a password
         """
         self.email: str = email
-        self.expiration: int = 0  # force credential refresh
+        self.password = password
+        self.refresh_token: str = refresh_token
+        self.ws_message_callabck: Callable = ws_message_callback
+
         self.access_token: str
         self.auth_token: str
-        self.head: dict = {}
-        self.refresh_token: str
+        self.expiration: int = 0  # force credential refresh
+        self.headers: dict = {}
         self.user_id: str
         self.vehicles: list[Vehicle] = []
-        self.ws_message_callabck: Callable = ws_message_callback
+
         self.sc: JLRStompClient = None
         self._sc_task: asyncio.Task = None
 
@@ -68,15 +71,6 @@ class Connection:
         else:
             self.device_id = str(uuid.uuid4())
 
-        if refresh_token:
-            self.oauth = {"grant_type": "refresh_token", "refresh_token": refresh_token}
-        else:
-            self.oauth = {
-                "grant_type": "password",
-                "username": email,
-                "password": password,
-            }
-
     async def validate_token(self):
         """Is token still valid"""
         now = calendar.timegm(datetime.now().timetuple())
@@ -84,27 +78,10 @@ class Connection:
             # Auth expired, reconnect
             await self.connect()
 
-    async def get(self, command: str, url: str, headers: dict) -> str | dict:
-        """GET data from API"""
-        await self.validate_token()
-        return await self._request(f"{url}/{command}", headers=headers, method="GET")
-
-    async def post(self, command: str, url: str, headers: dict, data: dict = None) -> str | dict:
-        """POST data to API"""
-        await self.validate_token()
-        return await self._request(f"{url}/{command}", headers=headers, data=data, method="POST")
-
-    async def delete(self, command: str, url: str, headers: dict) -> str | dict:
-        """DELETE data from api"""
-        await self.validate_token()
-        if headers and headers["Accept"]:
-            del headers["Accept"]
-        return await self._request(url=f"{url}/{command}", headers=headers, method="DELETE")
-
     async def connect(self):
         """Connect to JLR API"""
         logger.debug("Connecting...")
-        auth = await self._authenticate(data=self.oauth)
+        auth = await self._authenticate()
         self._register_auth(auth)
         self._set_header(auth["access_token"])
         logger.debug("[+] authenticated")
@@ -114,6 +91,7 @@ class Connection:
             vehicles = await self.get_vehicles()
             for vehicle in vehicles["vehicles"]:
                 self.vehicles.append(Vehicle(vehicle, self))
+                logger.info("Found: %s", vehicle)
         except TypeError as ex:
             logger.error("No vehicles associated with this account - %s", ex)
 
@@ -123,6 +101,68 @@ class Connection:
                     await vehicle.get_notification_available_services_list()
                 )
                 await self.ws_connect()
+
+    async def _authenticate(self) -> str | dict:
+        """Raw urlopen command to the auth url"""
+        if self.refresh_token:
+            oauth = {"grant_type": "refresh_token", "refresh_token": self.refresh_token}
+        else:
+            oauth = {
+                "grant_type": "password",
+                "username": self.email,
+                "password": self.password,
+            }
+        url = f"{self.base.IFAS}/tokens"
+        auth_headers = {
+            "Authorization": "Basic YXM6YXNwYXNz",
+            "Content-Type": HTTPContentType.JSON,
+            "X-Device-Id": self.device_id,
+        }
+        return await self._request(url, auth_headers, oauth, "POST")
+
+    def _register_auth(self, auth: dict):
+        self.access_token = auth["access_token"]
+        now = calendar.timegm(datetime.now().timetuple())
+        self.expiration = now + int(auth["expires_in"])
+        self.auth_token = auth["authorization_token"]
+        self.refresh_token = auth["refresh_token"]
+
+    def _set_header(self, access_token: str):
+        """Set HTTP header fields"""
+        self.headers = {
+            "Authorization": f"Bearer {access_token}",
+            "X-Device-Id": self.device_id,
+            "x-telematicsprogramtype": "jlrpy",
+            "Content-Type": HTTPContentType.JSON,
+        }
+
+    async def _register_device_and_log_in(self):
+        await self._register_device()
+        logger.debug("1/2 device id registered")
+        await self._login_user()
+        logger.debug("2/2 user logged in, user id retrieved")
+
+    async def _register_device(self) -> str | dict:
+        """Register the device Id"""
+        url = f"{self.base.IFOP}/users/{self.email}/clients"
+        headers = {}
+        data = {
+            "access_token": self.access_token,
+            "authorization_token": self.auth_token,
+            "expires_in": "86400",
+            "deviceID": self.device_id,
+        }
+        return await self._request(url, headers, data, "POST")
+
+    async def _login_user(self) -> dict:
+        """Login the user"""
+        url = f"{self.base.IF9}/users?loginName={self.email}"
+        headers = {"Accept": HttpAccepts.USER}
+        user_data = await self._request(url, headers)
+        self.user_id = user_data["userId"]
+        return user_data
+
+    # Websocket functions
 
     async def ws_connect(self):
         """Connect and subscribe to websocket service"""
@@ -135,28 +175,29 @@ class Connection:
                 self.device_id,
             )
             self._sc_task = await self.sc.connect()
-            await self.sc.subscribe(
-                WS_DESTINATION_DEVICE.format(self.device_id), self.ws_message_callabck
-            )
-            for vehicle in self.vehicles:
-                await self.sc.subscribe(
-                    WS_DESTINATION_VIN.format(vehicle.vin), self.ws_message_callabck
-                )
+            await self.ws_subscribe()
         else:
-            raise JLRException(
-                "No message callback has been configured.  Unable to connect webservice"
+            logger.debug(
+                "No message callback has been configured.  Not connecting to websocket service"
             )
+
+    async def ws_subscribe(self):
+        """Subscribe to message queues on websocket"""
+        await self.sc.subscribe(
+            WS_DESTINATION_DEVICE.format(self.device_id), self.ws_message_callabck
+        )
+        for vehicle in self.vehicles:
+            await self.sc.subscribe(
+                WS_DESTINATION_VIN.format(vehicle.vin), self.ws_message_callabck
+            )
+
+        # Schedule resubscriptions to keep alive
+        await self.sc.schedule_resubscription()
 
     async def ws_disconnect(self):
         """Disconnect stomp client"""
         if not self._sc_task.done:
             await self.sc.disconnect()
-
-    async def _register_device_and_log_in(self):
-        await self._register_device()
-        logger.debug("1/2 device id registered")
-        await self._login_user()
-        logger.debug("2/2 user logged in, user id retrieved")
 
     async def _request(
         self, url: str, headers: dict = None, data: dict = None, method: str = "GET"
@@ -185,71 +226,29 @@ class Connection:
                     )
                     raise JLRException(response)
 
-    def _register_auth(self, auth: dict):
-        self.access_token = auth["access_token"]
-        now = calendar.timegm(datetime.now().timetuple())
-        self.expiration = now + int(auth["expires_in"])
-        self.auth_token = auth["authorization_token"]
-        self.refresh_token = auth["refresh_token"]
-
     def _build_headers(self, add_headers: dict) -> dict:
         """Add additional headers to standard set"""
-        headers: dict = self.head.copy()
+        headers: dict = self.headers.copy()
         if add_headers:
             headers.update(add_headers)
         return headers
 
-    def _set_header(self, access_token: str):
-        """Set HTTP header fields"""
-        self.head = {
-            "Authorization": f"Bearer {access_token}",
-            "X-Device-Id": self.device_id,
-            "x-telematicsprogramtype": "jlrpy",
-            "Content-Type": HTTPContentType.JSON,
-        }
+    async def get(self, command: str, url: str, headers: dict) -> str | dict:
+        """GET data from API"""
+        await self.validate_token()
+        return await self._request(f"{url}/{command}", headers=headers, method="GET")
 
-    async def _authenticate(self, data: dict = None) -> str | dict:
-        """Raw urlopen command to the auth url"""
-        url = f"{self.base.IFAS}/tokens"
-        auth_headers = {
-            "Authorization": "Basic YXM6YXNwYXNz",
-            "Content-Type": HTTPContentType.JSON,
-            "X-Device-Id": self.device_id,
-        }
-        return await self._request(url, auth_headers, data, "POST")
+    async def post(self, command: str, url: str, headers: dict, data: dict = None) -> str | dict:
+        """POST data to API"""
+        await self.validate_token()
+        return await self._request(f"{url}/{command}", headers=headers, data=data, method="POST")
 
-    async def _register_device(self) -> str | dict:
-        """Register the device Id"""
-        url = f"{self.base.IFOP}/users/{self.email}/clients"
-        headers = {}
-        data = {
-            "access_token": self.access_token,
-            "authorization_token": self.auth_token,
-            "expires_in": "86400",
-            "deviceID": self.device_id,
-        }
-        return await self._request(url, headers, data, "POST")
-
-    async def _login_user(self) -> dict:
-        """Login the user"""
-        url = f"{self.base.IF9}/users?loginName={self.email}"
-        headers = {"Accept": HttpAccepts.USER}
-        user_data = await self._request(url, headers)
-        self.user_id = user_data["userId"]
-        return user_data
-
-    async def refresh_tokens(self):
-        """Refresh tokens."""
-        self.oauth = {
-            "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
-        }
-
-        auth = await self._authenticate(self.oauth)
-        self._register_auth(auth)
-        self._set_header(auth["access_token"])
-        logger.info("[+] Tokens refreshed")
-        await self._register_device_and_log_in()
+    async def delete(self, command: str, url: str, headers: dict) -> str | dict:
+        """DELETE data from api"""
+        await self.validate_token()
+        if headers and headers["Accept"]:
+            del headers["Accept"]
+        return await self._request(url=f"{url}/{command}", headers=headers, method="DELETE")
 
     async def get_websocket_url(self) -> str | dict:
         """Get websocket url"""
@@ -260,7 +259,7 @@ class Connection:
     async def get_vehicles(self) -> str | dict:
         """Get vehicles for user"""
         url = f"{self.base.IF9}/users/{self.user_id}/vehicles?primaryOnly=true"
-        return await self._request(url, self.head)
+        return await self._request(url)
 
     async def get_user_info(self):
         """Get user information"""

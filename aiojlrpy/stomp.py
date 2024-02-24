@@ -109,6 +109,28 @@ class JLRStompClient:
             await asyncio.sleep(0.1)
         self.connected = False
 
+    async def schedule_resubscription(self) -> asyncio.TimerHandle:
+        """schedule topic resubscription"""
+        logger.debug("Scheduling topic resubscription")
+        return asyncio.create_task(self.refresh_subscription())
+
+    async def refresh_subscription(self):
+        """Resubscribe to subscription queues"""
+        await asyncio.sleep(3600)
+        logger.debug("Running topic resubscription")
+        existing_subs = self._subscriptions.copy()
+
+        # Unsubscribe all subscriptions
+        for sub in existing_subs:
+            await self.unsubscribe(sub)
+
+        # Resubscribe in order
+        for sub in existing_subs:
+            await self.subscribe(sub, existing_subs[sub].callback)
+
+        # Schedule next resubsription
+        await self.schedule_resubscription()
+
     async def subscribe(self, destination: str, callback: Callable):
         """
         Subscribe to a destination and supply a callback that should be
@@ -126,7 +148,7 @@ class JLRStompClient:
     async def unsubscribe(self, destination: str):
         """Unsubscribe from a destination"""
         headers = {}
-        sub = self._subscriptions.get("topic")
+        sub = self._subscriptions.get(destination)
         if sub:
             headers["id"] = f"sub-{sub.sub_id}"
         await self._transmit(STOMPCommands.UNSUBSCRIBE, headers)
