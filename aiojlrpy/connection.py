@@ -39,6 +39,7 @@ class Connection:
         refresh_token: str = "",
         use_china_servers: bool = False,
         ws_message_callback: Callable = None,
+        websocket_auto_connect: bool = True,
     ):
         """Init the connection object
 
@@ -50,6 +51,7 @@ class Connection:
         self.password = password
         self.refresh_token: str = refresh_token
         self.ws_message_callabck: Callable = ws_message_callback
+        self.ws_auto_connect: bool = websocket_auto_connect
 
         self.access_token: str
         self.auth_token: str
@@ -94,13 +96,11 @@ class Connection:
                 logger.info("Found: %s", vehicle)
         except TypeError as ex:
             logger.error("No vehicles associated with this account - %s", ex)
+        except JLRException as ex:
+            logger.error(ex)
 
-        if self.vehicles and self.ws_message_callabck:
-            for vehicle in self.vehicles:
-                await vehicle.set_notification_target(
-                    await vehicle.get_notification_available_services_list()
-                )
-                await self.ws_connect()
+        if self.ws_auto_connect and self.ws_message_callabck:
+            await self.websocket_connect()
 
     async def _authenticate(self) -> str | dict:
         """Raw urlopen command to the auth url"""
@@ -164,24 +164,35 @@ class Connection:
 
     # Websocket functions
 
-    async def ws_connect(self):
+    async def websocket_connect(self):
         """Connect and subscribe to websocket service"""
-        if self.ws_message_callabck:
-            ws_url = await self.get_websocket_url()
-            self.sc = JLRStompClient(
-                f"{ws_url}/v2?{self.device_id}",
-                self.access_token,
-                self.email,
-                self.device_id,
-            )
-            self._sc_task = await self.sc.connect()
-            await self.ws_subscribe()
+        if self.vehicles:
+            if self.ws_message_callabck:
+                for vehicle in self.vehicles:
+                    await vehicle.set_notification_target(
+                        await vehicle.get_notification_available_services_list()
+                    )
+
+                if self.ws_message_callabck:
+                    ws_url = await self.get_websocket_url()
+                    self.sc = JLRStompClient(
+                        f"{ws_url}/v2?{self.device_id}",
+                        self.access_token,
+                        self.email,
+                        self.device_id,
+                    )
+                    self._sc_task = await self.sc.connect()
+                    await self.websocket_subscribe()
+                else:
+                    logger.debug(
+                        "No message callback has been configured.  Not connecting to websocket service"
+                    )
         else:
             logger.debug(
-                "No message callback has been configured.  Not connecting to websocket service"
+                "No vehicles associated with this account.  Not connecting websocket service"
             )
 
-    async def ws_subscribe(self):
+    async def websocket_subscribe(self):
         """Subscribe to message queues on websocket"""
         await self.sc.subscribe(
             WS_DESTINATION_DEVICE.format(self.device_id), self.ws_message_callabck
@@ -194,7 +205,7 @@ class Connection:
         # Schedule resubscriptions to keep alive
         await self.sc.schedule_resubscription()
 
-    async def ws_disconnect(self):
+    async def websocket_disconnect(self):
         """Disconnect stomp client"""
         if not self._sc_task.done:
             await self.sc.disconnect()
@@ -208,6 +219,7 @@ class Connection:
 
         if data is not None:
             kwargs["json"] = data
+
         async with aiohttp.ClientSession() as session:
             async with getattr(session, method.lower())(url, **kwargs) as response:
                 if response.ok:
