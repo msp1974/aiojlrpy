@@ -2,7 +2,7 @@
 Async python library to access to JLR InControl Services
 https://github.com/msp1974/aiojlrpy
 """
-__VERSION__ = "0.1.1"
+__VERSION__ = "0.1.2"
 
 from typing import Tuple
 
