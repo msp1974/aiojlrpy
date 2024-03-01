@@ -20,7 +20,7 @@ from aiojlrpy.const import (
     HttpAccepts,
 )
 from aiojlrpy.exceptions import JLRException
-from aiojlrpy.stomp import JLRStompClient
+from aiojlrpy.stomp import JLRStompClient, Subscription
 
 from aiojlrpy.vehicle import Vehicle
 
@@ -58,6 +58,7 @@ class Connection:
         self.expiration: int = 0  # force credential refresh
         self.headers: dict = {}
         self.user_id: str
+        self.user: dict
         self.vehicles: list[Vehicle] = []
 
         self.sc: JLRStompClient = None
@@ -81,26 +82,37 @@ class Connection:
             await self.connect()
 
     async def connect(self):
+        """Connect to JLRIncontrol service."""
+        if await self._connect_rest_api():
+            try:
+                vehicles = await self.get_vehicles()
+                for vehicle in vehicles["vehicles"]:
+                    self.vehicles.append(Vehicle(vehicle, self))
+                    logger.info("Found: %s", vehicle)
+            except TypeError as ex:
+                logger.error("No vehicles associated with this account - %s", ex)
+            except JLRException as ex:
+                logger.error(ex)
+
+            if self.ws_auto_connect and self.ws_message_callabck:
+                await self.websocket_connect()
+
+    async def _connect_rest_api(self):
         """Connect to JLR API"""
-        logger.debug("Connecting...")
-        auth = await self._authenticate()
-        self._register_auth(auth)
-        self._set_header(auth["access_token"])
-        logger.debug("[+] authenticated")
-        await self._register_device_and_log_in()
-
         try:
-            vehicles = await self.get_vehicles()
-            for vehicle in vehicles["vehicles"]:
-                self.vehicles.append(Vehicle(vehicle, self))
-                logger.info("Found: %s", vehicle)
-        except TypeError as ex:
-            logger.error("No vehicles associated with this account - %s", ex)
+            logger.debug("Connecting...")
+            auth = await self._authenticate()
+            self._register_auth(auth)
+            self._set_header(auth["access_token"])
+            logger.debug("[+] authenticated")
+            await self._register_device()
+            logger.debug("1/2 device id registered")
+            self.user = await self._login_user()
+            logger.debug("2/2 user logged in, user id retrieved")
+            return True
         except JLRException as ex:
-            logger.error(ex)
-
-        if self.ws_auto_connect and self.ws_message_callabck:
-            await self.websocket_connect()
+            logger.debug("Error connecting to rest api - %s", ex)
+            return False
 
     async def _authenticate(self) -> str | dict:
         """Raw urlopen command to the auth url"""
@@ -136,12 +148,6 @@ class Connection:
             "Content-Type": HTTPContentType.JSON,
         }
 
-    async def _register_device_and_log_in(self):
-        await self._register_device()
-        logger.debug("1/2 device id registered")
-        await self._login_user()
-        logger.debug("2/2 user logged in, user id retrieved")
-
     async def _register_device(self) -> str | dict:
         """Register the device Id"""
         url = f"{self.base.IFOP}/users/{self.email}/clients"
@@ -152,7 +158,7 @@ class Connection:
             "expires_in": "86400",
             "deviceID": self.device_id,
         }
-        return await self._request(url, headers, data, "POST")
+        await self._request(url, headers, data, "POST")
 
     async def _login_user(self) -> dict:
         """Login the user"""
@@ -168,46 +174,49 @@ class Connection:
         """Connect and subscribe to websocket service"""
         if self.vehicles:
             if self.ws_message_callabck:
-                for vehicle in self.vehicles:
-                    await vehicle.set_notification_target(
-                        await vehicle.get_notification_available_services_list()
-                    )
+                ws_url = await self.get_websocket_url()
 
-                if self.ws_message_callabck:
-                    ws_url = await self.get_websocket_url()
-                    self.sc = JLRStompClient(
-                        f"{ws_url}/v2?{self.device_id}",
-                        self.access_token,
-                        self.email,
-                        self.device_id,
-                    )
-                    self._sc_task = await self.sc.connect()
-                    await self.websocket_subscribe()
-                else:
-                    logger.debug(
-                        "No message callback has been configured.  Not connecting to websocket service"
-                    )
+                # Set service notifications
+                available_services = await self.vehicles[
+                    0
+                ].get_notification_available_services_list()
+                await self.vehicles[0].set_notification_target(available_services)
+
+                ws_subs = self.get_websocket_subscriptions()
+                self.sc = JLRStompClient(
+                    f"{ws_url}/v2?{self.device_id}",
+                    self.access_token,
+                    self.email,
+                    self.device_id,
+                    ws_subs,
+                )
+                self._sc_task = await self.sc.connect()
+            else:
+                logger.debug(
+                    "No message callback has been configured.  Not connecting to websocket service"
+                )
         else:
             logger.debug(
                 "No vehicles associated with this account.  Not connecting websocket service"
             )
 
-    async def websocket_subscribe(self):
-        """Subscribe to message queues on websocket"""
-        await self.sc.subscribe(
-            WS_DESTINATION_DEVICE.format(self.device_id), self.ws_message_callabck
+    def get_websocket_subscriptions(self):
+        """Generate subscription list"""
+        subscriptions = {}
+        subscriptions[WS_DESTINATION_DEVICE.format(self.device_id)] = Subscription(
+            1, self.ws_message_callabck
         )
-        for vehicle in self.vehicles:
-            await self.sc.subscribe(
-                WS_DESTINATION_VIN.format(vehicle.vin), self.ws_message_callabck
+
+        for idx, vehicle in enumerate(self.vehicles):
+            subscriptions[WS_DESTINATION_VIN.format(vehicle.vin)] = Subscription(
+                idx + 2, self.ws_message_callabck
             )
 
-        # Schedule resubscriptions to keep alive
-        await self.sc.schedule_resubscription()
+        return subscriptions
 
     async def websocket_disconnect(self):
         """Disconnect stomp client"""
-        if not self._sc_task.done:
+        if self._sc_task:
             await self.sc.disconnect()
 
     async def _request(
@@ -221,22 +230,27 @@ class Connection:
             kwargs["json"] = data
 
         async with aiohttp.ClientSession() as session:
-            async with getattr(session, method.lower())(url, **kwargs) as response:
-                if response.ok:
-                    content = await response.read()
-                    if len(content) > 0:
-                        response = content.decode("utf-8", "ignore")
-                        try:
-                            return json.loads(response)
-                        except json.decoder.JSONDecodeError:
-                            return response
+            try:
+                async with getattr(session, method.lower())(url, **kwargs) as response:
+                    if response.ok:
+                        content = await response.read()
+                        if len(content) > 0:
+                            response = content.decode("utf-8", "ignore")
+                            try:
+                                return json.loads(response)
+                            except json.decoder.JSONDecodeError:
+                                return response
+                        else:
+                            return {}
                     else:
-                        return {}
-                else:
-                    logger.warning(
-                        "URL: %s, HEADERS: %s, DATA: %s, METHOD: %s", url, headers, data, method
-                    )
-                    raise JLRException(response)
+                        logger.warning(
+                            "URL: %s, HEADERS: %s, DATA: %s, METHOD: %s", url, headers, data, method
+                        )
+                        raise JLRException(response)
+            except TimeoutError as ex:
+                raise JLRException(ex) from ex
+            except Exception as ex:
+                raise JLRException(ex) from ex
 
     def _build_headers(self, add_headers: dict) -> dict:
         """Add additional headers to standard set"""

@@ -51,6 +51,7 @@ class Subscription:
 
     sub_id: int
     callback: Callable
+    active: bool = False
 
 
 class JLRStompClient:
@@ -62,13 +63,14 @@ class JLRStompClient:
         access_token: str,
         email: str,
         device_id: str,
+        subscriptions: dict[str, Subscription] = None,
     ):
         """Initialise"""
         self.url = url
         self.access_token = access_token
         self.email = email
         self.device_id = device_id
-        self._subscriptions: dict[str, Subscription] = {}
+        self.subscriptions = subscriptions
         self.connected: bool = False
 
         self.ws = WebsocketHandler(
@@ -87,11 +89,20 @@ class JLRStompClient:
         Connect to the remote STOMP server
         """
         # Create websocket connection
+        logger.debug("Connect to websocket")
         task = asyncio.create_task(self.ws.connect())
         # wait until connected
         while not self.connected:
             await asyncio.sleep(0.10)
+        logger.debug("STOMP client connected")
 
+        # Connected, run subscriptions
+        for destination, sub in self.subscriptions.items():
+            logger.debug("Subscribing to %s", destination)
+            await self.subscribe(destination, sub.callback)
+
+        # Schedule resubscription task
+        await self.schedule_resubscription()
         return task
 
     async def disconnect(self):
@@ -99,12 +110,12 @@ class JLRStompClient:
         Unsubscribe all subscriptions,
         send discocnect message and send websocket close message
         """
-        for sub in self._subscriptions.copy():
-            await self.unsubscribe(sub)
+        for destination in self.subscriptions:
+            await self.unsubscribe(destination)
         await self._transmit(STOMPCommands.DISCONNECT)
 
         # Close websocket
-        await self.ws.send_message("CLOSE")
+        await self.ws.disconnect()
         while self.ws.ws_connected:
             await asyncio.sleep(0.1)
         self.connected = False
@@ -112,21 +123,22 @@ class JLRStompClient:
     async def schedule_resubscription(self) -> asyncio.TimerHandle:
         """schedule topic resubscription"""
         logger.debug("Scheduling topic resubscription")
-        return asyncio.create_task(self.refresh_subscription())
+        return asyncio.create_task(self.refresh_subscription(3600))
 
-    async def refresh_subscription(self):
+    async def refresh_subscription(self, delay: int):
         """Resubscribe to subscription queues"""
-        await asyncio.sleep(3600)
+        await asyncio.sleep(delay)
         logger.debug("Running topic resubscription")
-        existing_subs = self._subscriptions.copy()
 
-        # Unsubscribe all subscriptions
-        for sub in existing_subs:
-            await self.unsubscribe(sub)
+        # Unsubscribe all subscriptions in reverse order of sub-id
+        for destination in sorted(
+            self.subscriptions, key=lambda dest: self.subscriptions[dest].sub_id, reverse=True
+        ):
+            await self.unsubscribe(destination)
 
         # Resubscribe in order
-        for sub in existing_subs:
-            await self.subscribe(sub, existing_subs[sub].callback)
+        for destination, sub in self.subscriptions.items():
+            await self.subscribe(destination, sub.callback)
 
         # Schedule next resubsription
         await self.schedule_resubscription()
@@ -137,22 +149,22 @@ class JLRStompClient:
         executed when a message is received on that destination
         """
         headers = {}
-        sub_id = self._get_next_sub_id()
+        sub_id = self._get_sub_id(destination)
         headers["id"] = f"sub-{sub_id}"
         headers["destination"] = destination
         headers["deviceId"] = self.device_id
 
         await self._transmit(STOMPCommands.SUBSCRIBE, headers)
-        self._subscriptions[destination] = Subscription(sub_id, callback)
+        self.subscriptions[destination] = Subscription(sub_id, callback, True)
 
     async def unsubscribe(self, destination: str):
         """Unsubscribe from a destination"""
         headers = {}
-        sub = self._subscriptions.get(destination)
+        sub = self.subscriptions.get(destination)
         if sub:
             headers["id"] = f"sub-{sub.sub_id}"
         await self._transmit(STOMPCommands.UNSUBSCRIBE, headers)
-        self._subscriptions.pop(destination)
+        self.subscriptions[destination].active = False
 
     async def send(self, destination, headers, message):
         """
@@ -181,6 +193,7 @@ class JLRStompClient:
     async def _on_connect(self):
         """Callback for connected session"""
         # Connect to stomp service
+        logger.debug("Websocket connected")
         headers = {}
         headers["host"] = urlparse(self.url).hostname
         headers["accept-version"] = "1.2"
@@ -193,7 +206,8 @@ class JLRStompClient:
     async def _on_disconnect(self):
         """Callback for disconnection"""
         logger.debug("Websocket has disconnected")
-        self._subscriptions = {}
+        for _, sub in self.subscriptions.items():
+            sub.active = False
         self.connected = False
 
     async def _on_error(self, error):
@@ -222,12 +236,12 @@ class JLRStompClient:
 
                 if isinstance(body_json, list):
                     for b in body_json:
-                        self._subscriptions[headers["destination"]].callback(
+                        self.subscriptions[headers["destination"]].callback(
                             self._get_status_message(command, headers, b)
                         )
                 else:
                     status_message = self._get_status_message(command, headers, body_json)
-                    func = self._subscriptions[headers["destination"]].callback
+                    func = self.subscriptions[headers["destination"]].callback
                     if asyncio.iscoroutinefunction(func):
                         await func(status_message)
                     else:
@@ -250,10 +264,13 @@ class JLRStompClient:
             body.get("a") if body.get("a") else body,
         )
 
-    def _get_next_sub_id(self):
+    def _get_sub_id(self, destination: str):
         """Get incremented sub id"""
-        if self._subscriptions:
-            sub_id = max(self._subscriptions.values(), key=operator.attrgetter("sub_id")).sub_id
+        if self.subscriptions:
+            # Check if exisiting subscription
+            if destination in self.subscriptions:
+                return self.subscriptions[destination].sub_id
+            sub_id = max(self.subscriptions.values(), key=operator.attrgetter("sub_id")).sub_id
             return int(sub_id) + 1
         return 1
 

@@ -35,6 +35,7 @@ class WebsocketHandler:
         self.on_error = on_error
         self.on_message = on_message
 
+        self._ws = None
         self.ws_connected: bool = False
         self._subscriptions: dict = {}
         self.headers = {
@@ -80,13 +81,16 @@ class WebsocketHandler:
         :param websocket: Websocket connection
         :return:
         """
-        ws_open: bool = True
-        while ws_open:
+        while self.ws_connected:
             message = await self.send_message_queue.get()
-            if message == "CLOSE":
-                await websocket.close()
-            else:
-                await websocket.send_str(message)
+            await websocket.send_str(message)
+
+    async def disconnect(self) -> None:
+        """Disconnect websocket."""
+        if self.on_disconnect:
+            await self.on_disconnect()
+
+        await self._ws.close()
 
     async def connect(self) -> None:
         """
@@ -95,8 +99,10 @@ class WebsocketHandler:
         * Task that sens messages int he queue
         :return:
         """
+        logger.debug("Connecting websocket")
         async with ClientSession() as session:
             async with session.ws_connect(self.url, headers=self.headers) as ws:
+                self._ws = ws
                 self.ws_connected = True
                 if self.on_connect:
                     await self.on_connect()
@@ -115,16 +121,13 @@ class WebsocketHandler:
                 # In this program, this can happen when:
                 #   * we (the client) or the server is closing the connection. (websocket.close() in aiohttp)
                 #   * an exception is raised
-                if self.on_disconnect:
-                    await self.on_disconnect()
-
+                logger.debug("Websocket disconnected")
                 # First, we want to close the websocket connection if it's not closed by some other function above
                 if not ws.closed:
                     await ws.close()
                 # Then, we cancel each task which is pending:
                 for task in pending:
                     task.cancel()
-                    # At this point, everything is shut down. The program will exit.
 
                 self.ws_connected = False
 
