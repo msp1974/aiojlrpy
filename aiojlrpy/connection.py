@@ -102,6 +102,7 @@ class Connection:
         try:
             logger.debug("Connecting...")
             auth = await self._authenticate()
+            logger.debug(auth)
             self._register_auth(auth)
             self._set_header(auth["access_token"])
             logger.debug("[+] authenticated")
@@ -123,8 +124,9 @@ class Connection:
                 "grant_type": "password",
                 "username": self.email,
                 "password": self.password,
+                "push_type": "",
             }
-        url = f"{self.base.IFAS}/tokens"
+        url = f"{self.base.IFAS}/tokens/tokensSSO"
         auth_headers = {
             "Authorization": "Basic YXM6YXNwYXNz",
             "Content-Type": HTTPContentType.JSON,
@@ -146,6 +148,8 @@ class Connection:
             "X-Device-Id": self.device_id,
             "x-telematicsprogramtype": "jlrpy",
             "Content-Type": HTTPContentType.JSON,
+            "x-App-Id": "ICR_LAND_ROVER",
+            "x-App-Secret": "018dd169-94b7-7cb6-8f7f-c263c91f1121",
         }
 
     async def _register_device(self) -> str | dict:
@@ -158,13 +162,19 @@ class Connection:
             "expires_in": "86400",
             "deviceID": self.device_id,
         }
-        await self._request(url, headers, data, "POST")
+        result = await self._request(url, headers, data, "POST")
+        logger.debug(result)
 
     async def _login_user(self) -> dict:
         """Login the user"""
         url = f"{self.base.IF9}/users?loginName={self.email}"
-        headers = {"Accept": HttpAccepts.USER}
+        headers = {
+            "Accept": HttpAccepts.USER,
+            "x-App-Id": "ICR_LAND_ROVER",
+            "x-App-Secret": "018dd169-94b7-7cb6-8f7f-c263c91f1121",
+        }
         user_data = await self._request(url, headers)
+        logger.debug(user_data)
         self.user_id = user_data["userId"]
         return user_data
 
