@@ -1,4 +1,4 @@
-""" Python class to access the JLR Remote Car API
+"""Python class to access the JLR Remote Car API
 https://github.com/msp1974/aiojlrpy
 """
 
@@ -148,8 +148,8 @@ class Connection:
             "X-Device-Id": self.device_id,
             "x-telematicsprogramtype": "jlrpy",
             "Content-Type": HTTPContentType.JSON,
-            "x-App-Id": "ICR_LAND_ROVER",
-            "x-App-Secret": "018dd169-94b7-7cb6-8f7f-c263c91f1121",
+            "x-App-Id": "ICR_JAGUAR_ANDROID",
+            "x-App-Secret": "7bf6f544-1926-4714-8066-ceceb40d538d",
         }
 
     async def _register_device(self) -> str | dict:
