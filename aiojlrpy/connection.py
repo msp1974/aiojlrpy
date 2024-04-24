@@ -168,11 +168,8 @@ class Connection:
     async def _login_user(self) -> dict:
         """Login the user"""
         url = f"{self.base.IF9}/users?loginName={self.email}"
-        headers = {
-            "Accept": HttpAccepts.USER,
-            "x-App-Id": "ICR_LAND_ROVER",
-            "x-App-Secret": "018dd169-94b7-7cb6-8f7f-c263c91f1121",
-        }
+        headers = self.headers.copy()
+        headers["Accept"] = HttpAccepts.USER
         user_data = await self._request(url, headers)
         logger.debug(user_data)
         self.user_id = user_data["userId"]
