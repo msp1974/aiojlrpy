@@ -1,6 +1,5 @@
 """Class to represent a JLR vehicle"""
 
-
 from datetime import datetime, timedelta
 import logging
 import uuid
@@ -243,7 +242,7 @@ class Vehicle:
         """Get vehicle health status from vehicle"""
         headers = {
             "Accept": HttpAccepts.SERVICE_STATUS_V4,
-            "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
+            "Content-Type": HTTPContentType.SERVICE_CONFIG,
         }
         vhs_data = await self._authenticate_service("", JLRServices.VEHICLE_HEALTH)
         return await self._post("healthstatus", headers, vhs_data)
@@ -348,7 +347,7 @@ class Vehicle:
         """Sound the horn and blink lights"""
         headers = {
             "Accept": HttpAccepts.SERVICE_STATUS_V4,
-            "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
+            "Content-Type": HTTPContentType.SERVICE_CONFIG,
         }
         # Authenticates using last 4 digits of vin as pin
         hblf_data = await self._authenticate_service(self.vin[-4:], JLRServices.HONK_BLINK)
@@ -356,7 +355,7 @@ class Vehicle:
 
     async def lock(self, pin: str):
         """Lock vehicle. Requires personal PIN for authentication"""
-        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG_V3}
+        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG}
         rdl_data = await self._authenticate_service(pin, JLRServices.REMOTE_DOOR_LOCK)
         return await self._post("lock", headers, rdl_data)
 
@@ -375,14 +374,14 @@ class Vehicle:
 
     async def remote_engine_start(self, pin: str, target_value: int):
         """Start Remote Engine preconditioning"""
-        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG_V2}
+        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG}
         await self.set_rcc_target_value(pin, target_value)
         reon_data = await self._authenticate_service(pin, JLRServices.REMOTE_ENGINE_ON)
         return await self._post("engineOn", headers, reon_data)
 
     async def remote_engine_stop(self, pin: str):
         """Stop Remote Engine preconditioning"""
-        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG_V2}
+        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG}
         reoff_data = await self._authenticate_service(pin, JLRServices.REMOTE_ENGINE_OFF)
 
         return await self._post("engineOff", headers, reoff_data)
@@ -390,7 +389,7 @@ class Vehicle:
     async def reset_alarm(self, pin: str):
         """Reset vehicle alarm"""
         headers = {
-            "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
+            "Content-Type": HTTPContentType.SERVICE_CONFIG,
             "Accept": HttpAccepts.SERVICE_STATUS_V4,
         }
         aloff_data = await self._authenticate_service(pin, JLRServices.ALARM_OFF)
@@ -398,7 +397,7 @@ class Vehicle:
 
     async def unlock(self, pin: str):
         """Unlock vehicle. Requires personal PIN for authentication"""
-        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG_V3}
+        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG}
         rdu_data = await self._authenticate_service(pin, JLRServices.REMOTE_DOOR_UNLOCK)
         return await self._post("unlock", headers, rdu_data)
 
@@ -444,7 +443,7 @@ class Vehicle:
 
     async def _prov_command(self, pin: str, expiration_time: int, mode: str):
         """Send prov endpoint commands. Used for service/transport/privacy mode"""
-        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG_V3}
+        headers = {"Content-Type": HTTPContentType.SERVICE_CONFIG}
         prov_data = await self._authenticate_service(pin, JLRServices.PROVISIONING_MODE)
         prov_data.update({"serviceCommand": mode, "startTime": None, "endTime": expiration_time})
         return await self._post("prov", headers, prov_data)
@@ -453,7 +452,7 @@ class Vehicle:
         """Set the wakeup time for the specified time (epoch milliseconds)"""
         headers = {
             "Accept": HttpAccepts.SERVICE_STATUS_V4,
-            "Content-Type": HTTPContentType.SERVICE_CONFIG_V3,
+            "Content-Type": HTTPContentType.SERVICE_CONFIG,
         }
         return await self._post("swu", headers, swu_data)
 

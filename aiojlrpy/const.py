@@ -1,4 +1,5 @@
 """Constants to support aiojlrpy"""
+
 from enum import StrEnum
 
 TIMEOUT = 15
@@ -73,8 +74,7 @@ class HTTPContentType(StrEnum):
     AUTH_REQUEST = "application/vnd.wirelesscar.ngtp.if9.AuthenticateRequest-v2+json; charset=utf-8"
     NOTIFICATION_TARGETS = "application/vnd.wirelesscar.ngtp.if9.NotificationTargets-v2+json"
     PHEV_SERVICE = "application/vnd.wirelesscar.ngtp.if9.PhevService-v1+json; charset=utf-8"
-    SERVICE_CONFIG_V2 = "application/vnd.wirelesscar.ngtp.if9.StartServiceConfiguration-v2+json"
-    SERVICE_CONFIG_V3 = (
+    SERVICE_CONFIG = (
         "application/vnd.wirelesscar.ngtp.if9.StartServiceConfiguration-v3+json; charset=utf-8"
     )
     USER = "application/vnd.wirelesscar.ngtp.if9.User-v3+json; charset=utf-8"
