@@ -63,6 +63,7 @@ class Connection:
 
         self.sc: JLRStompClient = None
         self._sc_task: asyncio.Task = None
+        self.reconnect_websocket: bool = True
 
         if use_china_servers:
             self.base = ChinaBaseURLs
@@ -79,7 +80,14 @@ class Connection:
         now = calendar.timegm(datetime.now().timetuple())
         if now > self.expiration:
             # Auth expired, reconnect
-            await self.connect()
+            await self.reauthenticate()
+
+    async def reauthenticate(self) -> str:
+        """Reauthenticate for updated token."""
+        logger.debug("Reauthenticating..")
+        auth = await self._authenticate()
+        self._register_auth(auth)
+        return self.access_token
 
     async def connect(self):
         """Connect to JLRIncontrol service."""
@@ -104,7 +112,7 @@ class Connection:
             auth = await self._authenticate()
             logger.debug(auth)
             self._register_auth(auth)
-            self._set_header(auth["access_token"])
+            self._set_headers()
             logger.debug("[+] authenticated")
             await self._register_device()
             logger.debug("1/2 device id registered")
@@ -118,8 +126,10 @@ class Connection:
     async def _authenticate(self) -> str | dict:
         """Raw urlopen command to the auth url"""
         if self.refresh_token:
+            logger.debug("Authenticating using refresh token")
             oauth = {"grant_type": "refresh_token", "refresh_token": self.refresh_token}
         else:
+            logger.debug("Authenticating using credentials")
             oauth = {
                 "grant_type": "password",
                 "username": self.email,
@@ -141,10 +151,10 @@ class Connection:
         self.auth_token = auth["authorization_token"]
         self.refresh_token = auth["refresh_token"]
 
-    def _set_header(self, access_token: str):
+    def _set_headers(self):
         """Set HTTP header fields"""
         self.headers = {
-            "Authorization": f"Bearer {access_token}",
+            "Authorization": f"Bearer {self.access_token}",
             "X-Device-Id": self.device_id,
             "x-telematicsprogramtype": "jlrpy",
             "Content-Type": HTTPContentType.JSON,
@@ -179,6 +189,8 @@ class Connection:
 
     async def websocket_connect(self):
         """Connect and subscribe to websocket service"""
+        await self.validate_token()
+
         if self.vehicles:
             if self.ws_message_callabck:
                 ws_url = await self.get_websocket_url()
@@ -196,6 +208,8 @@ class Connection:
                     self.email,
                     self.device_id,
                     ws_subs,
+                    self.on_websocket_connect,
+                    self.on_websocket_disconnect,
                 )
                 self._sc_task = await self.sc.connect()
             else:
@@ -206,6 +220,16 @@ class Connection:
             logger.debug(
                 "No vehicles associated with this account.  Not connecting websocket service"
             )
+
+    async def on_websocket_connect(self):
+        """Callback when websocket connected."""
+        logger.debug("Stomp via websocket client initialised")
+
+    async def on_websocket_disconnect(self):
+        """Callback when websocket disconnected."""
+        if self.reconnect_websocket:
+            logger.debug("Stomp via websocket client disconnected.  Reconnecting...")
+            asyncio.create_task(self.websocket_connect())
 
     def get_websocket_subscriptions(self):
         """Generate subscription list"""
@@ -223,6 +247,7 @@ class Connection:
 
     async def websocket_disconnect(self):
         """Disconnect stomp client"""
+        self.reconnect_websocket = False
         if self._sc_task:
             await self.sc.disconnect()
 

@@ -1,4 +1,5 @@
-""" A class for STOMP client compatible with JLR webservice"""
+"""A class for STOMP client compatible with JLR webservice"""
+
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from aiojlrpy.websocket import WebsocketHandler
 logger = logging.getLogger(__name__)
 
 
-BYTE = {"LF": "\x0A", "NULL": "\x00"}
+BYTE = {"LF": "\x0a", "NULL": "\x00"}
 LF = "\n"
 
 
@@ -30,6 +31,7 @@ class STOMPCommands(StrEnum):
     SUBSCRIBE = "SUBSCRIBE"
     UNSUBSCRIBE = "UNSUBSCRIBE"
     SEND = "SEND"
+    ERROR = "ERROR"
 
 
 @dataclass
@@ -64,6 +66,8 @@ class JLRStompClient:
         email: str,
         device_id: str,
         subscriptions: dict[str, Subscription] = None,
+        connect_callback: Callable = None,
+        disconnect_callback: Callable = None,
     ):
         """Initialise"""
         self.url = url
@@ -71,7 +75,11 @@ class JLRStompClient:
         self.email = email
         self.device_id = device_id
         self.subscriptions = subscriptions
+        self.connect_callback = connect_callback
+        self.disconnect_callback = disconnect_callback
+
         self.connected: bool = False
+        self.reschedule_task: asyncio.Task = None
 
         self.ws = WebsocketHandler(
             self.url,
@@ -103,12 +111,14 @@ class JLRStompClient:
 
         # Schedule resubscription task
         await self.schedule_resubscription()
+        await self.connect_callback()
         return task
 
     async def disconnect(self):
         """
         Unsubscribe all subscriptions,
         send discocnect message and send websocket close message
+        Do not reconnect
         """
         for destination in self.subscriptions:
             await self.unsubscribe(destination)
@@ -123,7 +133,7 @@ class JLRStompClient:
     async def schedule_resubscription(self) -> asyncio.TimerHandle:
         """schedule topic resubscription"""
         logger.debug("Scheduling topic resubscription")
-        return asyncio.create_task(self.refresh_subscription(3600))
+        self.reschedule_task = asyncio.create_task(self.refresh_subscription(3600))
 
     async def refresh_subscription(self, delay: int):
         """Resubscribe to subscription queues"""
@@ -159,6 +169,7 @@ class JLRStompClient:
 
     async def unsubscribe(self, destination: str):
         """Unsubscribe from a destination"""
+        logger.debug("Unsubscribing %s", destination)
         headers = {}
         sub = self.subscriptions.get(destination)
         if sub:
@@ -205,13 +216,15 @@ class JLRStompClient:
 
     async def _on_disconnect(self):
         """Callback for disconnection"""
-        logger.debug("Websocket has disconnected")
-        for _, sub in self.subscriptions.items():
-            sub.active = False
+        self.reschedule_task.cancel()
         self.connected = False
+
+        if self.disconnect_callback:
+            await self.disconnect_callback()
 
     async def _on_error(self, error):
         """Callback for error"""
+        logger.debug("Websocket error - %s", error)
 
     async def _on_message(self, message):
         """
@@ -227,6 +240,9 @@ class JLRStompClient:
 
             if command == STOMPCommands.CONNECTED:
                 self.connected = True
+
+            if command == STOMPCommands.ERROR:
+                pass
 
             # if message received, call appropriate callback
             if command == STOMPCommands.MESSAGE:

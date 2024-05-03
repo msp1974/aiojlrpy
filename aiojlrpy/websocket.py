@@ -72,7 +72,10 @@ class WebsocketHandler:
                             self.on_error(message)
                 elif message.type in [WSMsgType.closing, WSMsgType.closed, WSMsgType.close]:
                     if self.on_disconnect:
-                        await self.on_disconnect()
+                        if asyncio.iscoroutinefunction(self.on_disconnect):
+                            await self.on_disconnect()
+                        else:
+                            self.on_disconnect()
 
     async def _send_messages(self, websocket: ClientWebSocketResponse) -> None:
         """
@@ -87,10 +90,8 @@ class WebsocketHandler:
 
     async def disconnect(self) -> None:
         """Disconnect websocket."""
-        if self.on_disconnect:
-            await self.on_disconnect()
-
-        await self._ws.close()
+        if not self._ws.closed:
+            await self._ws.close()
 
     async def connect(self) -> None:
         """
@@ -121,14 +122,15 @@ class WebsocketHandler:
                 # In this program, this can happen when:
                 #   * we (the client) or the server is closing the connection. (websocket.close() in aiohttp)
                 #   * an exception is raised
-                logger.debug("Websocket disconnected")
-                # First, we want to close the websocket connection if it's not closed by some other function above
-                if not ws.closed:
-                    await ws.close()
+                logger.debug("Websocket has been disconnected")
+                self.ws_connected = False
+
+                # Call disconnect callback
+                if self.on_disconnect:
+                    await self.on_disconnect()
+
                 # Then, we cancel each task which is pending:
                 for task in pending:
                     task.cancel()
-
-                self.ws_connected = False
 
                 # At this point, everything is shut down. The program will exit.
