@@ -11,6 +11,7 @@ import logging
 import uuid
 import aiohttp
 from aiojlrpy.const import (
+    EXPIRE_TOKEN_REDUCTION_PERCENTAGE,
     TIMEOUT,
     WS_DESTINATION_DEVICE,
     WS_DESTINATION_VIN,
@@ -80,14 +81,11 @@ class Connection:
         now = calendar.timegm(datetime.now().timetuple())
         if now > self.expiration:
             # Auth expired, reconnect
-            await self.reauthenticate()
+            await self._connect_rest_api(reconnection=True)
 
-    async def reauthenticate(self) -> str:
-        """Reauthenticate for updated token."""
-        logger.debug("Reauthenticating..")
-        auth = await self._authenticate()
-        self._register_auth(auth)
-        return self.access_token
+            # Force STOMP client reconnection
+            if self.sc.connected:
+                self.sc.disconnect()
 
     async def connect(self):
         """Connect to JLRIncontrol service."""
@@ -105,7 +103,7 @@ class Connection:
             if self.ws_auto_connect and self.ws_message_callabck:
                 await self.websocket_connect()
 
-    async def _connect_rest_api(self):
+    async def _connect_rest_api(self, reconnection: bool = False):
         """Connect to JLR API"""
         try:
             logger.debug("Connecting...")
@@ -113,11 +111,15 @@ class Connection:
             logger.debug(auth)
             self._register_auth(auth)
             self._set_headers()
-            logger.debug("[+] authenticated")
+            logger.debug(
+                "Authenticated.  Expiry in %s",
+                datetime.utcfromtimestamp(self.expiration).strftime("%Y-%m-%d %H:%M:%S"),
+            )
             await self._register_device()
-            logger.debug("1/2 device id registered")
-            self.user = await self._login_user()
-            logger.debug("2/2 user logged in, user id retrieved")
+            logger.debug("Device ID registered")
+            if not reconnection:
+                self.user = await self._login_user()
+                logger.debug("User info retrieved")
             return True
         except JLRException as ex:
             logger.debug("Error connecting to rest api - %s", ex)
@@ -147,7 +149,9 @@ class Connection:
     def _register_auth(self, auth: dict):
         self.access_token = auth["access_token"]
         now = calendar.timegm(datetime.now().timetuple())
-        self.expiration = now + int(auth["expires_in"])
+        self.expiration = now + int(
+            int(auth["expires_in"]) * (EXPIRE_TOKEN_REDUCTION_PERCENTAGE / 100)
+        )  # Reauth before expiry to ensure never expires
         self.auth_token = auth["authorization_token"]
         self.refresh_token = auth["refresh_token"]
 
@@ -172,8 +176,7 @@ class Connection:
             "expires_in": "86400",
             "deviceID": self.device_id,
         }
-        result = await self._request(url, headers, data, "POST")
-        logger.debug(result)
+        await self._request(url, headers, data, "POST")
 
     async def _login_user(self) -> dict:
         """Login the user"""
@@ -205,6 +208,7 @@ class Connection:
                 self.sc = JLRStompClient(
                     f"{ws_url}/v2?{self.device_id}",
                     self.access_token,
+                    self.expiration,
                     self.email,
                     self.device_id,
                     ws_subs,
@@ -275,7 +279,7 @@ class Connection:
                         else:
                             return {}
                     else:
-                        logger.warning(
+                        logger.debug(
                             "URL: %s, HEADERS: %s, DATA: %s, METHOD: %s", url, headers, data, method
                         )
                         raise JLRException(response)

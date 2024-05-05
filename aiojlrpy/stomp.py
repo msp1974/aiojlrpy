@@ -1,6 +1,7 @@
 """A class for STOMP client compatible with JLR webservice"""
 
 import asyncio
+import calendar
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +12,8 @@ import operator
 import string
 from urllib.parse import urlparse
 
-from aiojlrpy.websocket import WebsocketHandler
+from .const import RESUBSCRIBE_INTERVAL_SECONDS
+from .websocket import WebsocketHandler
 
 
 logger = logging.getLogger(__name__)
@@ -63,6 +65,7 @@ class JLRStompClient:
         self,
         url: str,
         access_token: str,
+        token_expiry: int,
         email: str,
         device_id: str,
         subscriptions: dict[str, Subscription] = None,
@@ -72,6 +75,7 @@ class JLRStompClient:
         """Initialise"""
         self.url = url
         self.access_token = access_token
+        self.token_expiry = token_expiry
         self.email = email
         self.device_id = device_id
         self.subscriptions = subscriptions
@@ -92,12 +96,20 @@ class JLRStompClient:
             self._on_message,
         )
 
+    def validate_token(self):
+        """Is token still valid"""
+        now = calendar.timegm(datetime.now().timetuple())
+        if now > self.token_expiry:
+            return False
+        # Auth expired
+        return True
+
     async def connect(self):
         """
         Connect to the remote STOMP server
         """
         # Create websocket connection
-        logger.debug("Connect to websocket")
+        logger.debug("Connecting to websocket")
         task = asyncio.create_task(self.ws.connect())
         # wait until connected
         while not self.connected:
@@ -133,25 +145,31 @@ class JLRStompClient:
     async def schedule_resubscription(self) -> asyncio.TimerHandle:
         """schedule topic resubscription"""
         logger.debug("Scheduling topic resubscription")
-        self.reschedule_task = asyncio.create_task(self.refresh_subscription(3600))
+        self.reschedule_task = asyncio.create_task(
+            self.refresh_subscription(RESUBSCRIBE_INTERVAL_SECONDS)
+        )
 
     async def refresh_subscription(self, delay: int):
         """Resubscribe to subscription queues"""
         await asyncio.sleep(delay)
-        logger.debug("Running topic resubscription")
+        if self.validate_token():
+            logger.debug("Running topic resubscription")
 
-        # Unsubscribe all subscriptions in reverse order of sub-id
-        for destination in sorted(
-            self.subscriptions, key=lambda dest: self.subscriptions[dest].sub_id, reverse=True
-        ):
-            await self.unsubscribe(destination)
+            # Unsubscribe all subscriptions in reverse order of sub-id
+            for destination in sorted(
+                self.subscriptions, key=lambda dest: self.subscriptions[dest].sub_id, reverse=True
+            ):
+                await self.unsubscribe(destination)
 
-        # Resubscribe in order
-        for destination, sub in self.subscriptions.items():
-            await self.subscribe(destination, sub.callback)
+            # Resubscribe in order
+            for destination, sub in self.subscriptions.items():
+                await self.subscribe(destination, sub.callback)
 
-        # Schedule next resubsription
-        await self.schedule_resubscription()
+            # Schedule next resubsription
+            await self.schedule_resubscription()
+        else:
+            logger.debug("Token has expired.  Disconnecting")
+            await self.disconnect()
 
     async def subscribe(self, destination: str, callback: Callable):
         """
